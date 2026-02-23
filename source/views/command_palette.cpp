@@ -149,7 +149,7 @@ void CommandPalette::drawInput() {
 }
 
 void CommandPalette::drawList(float width) {
-  ImGui::BeginChild("##command_matches", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_NavFlattened);
+  ImGui::BeginChild("##command_matches", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiChildFlags_NavFlattened);
   float maxWidth = 0;
   for (const auto& match : matches) {
     auto width = ImGui::CalcTextSize(match.label.c_str()).x;
