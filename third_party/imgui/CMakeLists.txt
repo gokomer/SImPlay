@@ -10,7 +10,7 @@ add_library(imgui OBJECT
   source/imgui_demo.cpp
   source/imgui_draw.cpp
   source/imgui_freetype.cpp
-  source/imgui_impl_glfw.cpp
+  source/imgui_impl_sdl3.cpp
   source/imgui_impl_opengl3.cpp
   source/imgui_tables.cpp
   source/imgui_widgets.cpp
@@ -19,9 +19,9 @@ add_library(imgui OBJECT
   source/fonts/unifont.c
 )
 
-target_include_directories(imgui PUBLIC include ${FREETYPE_INCLUDE_DIRS} ${GLFW_INCLUDE_DIRS})
+target_include_directories(imgui PUBLIC include ${FREETYPE_INCLUDE_DIRS})
 target_link_libraries(imgui PUBLIC
-  ${CMAKE_DL_LIBS} ${FREETYPE_LIBRARIES} ${GLFW_LIBRARIES}
+  ${CMAKE_DL_LIBS} ${FREETYPE_LIBRARIES} SDL3::SDL3
   $<$<BOOL:${USE_OPENGL_ES3}>:${OPENGL_LIBRARIES}>
 )
 target_compile_definitions(imgui PRIVATE

@@ -7,7 +7,7 @@
 #include <thread>
 #include <imgui.h>
 #include <imgui_internal.h>
-#include <imgui_impl_glfw.h>
+#include <imgui_impl_sdl3.h>
 #include <imgui_impl_opengl3.h>
 #include <strnatcmp.h>
 #ifdef _WIN32
@@ -18,56 +18,54 @@
 
 namespace ImPlay {
 Window::Window(Config* config) : Player(config) {
-  initGLFW();
-  window = glfwCreateWindow(1280, 720, PLAYER_NAME, nullptr, nullptr);
-  if (window == nullptr) throw std::runtime_error("Failed to create window!");
+  initSDL();
+  window = SDL_CreateWindow(PLAYER_NAME, 1280, 720,
+                            SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE |
+                                SDL_WINDOW_HIGH_PIXEL_DENSITY);
+  if (window == nullptr) throw std::runtime_error(fmt::format("Failed to create window: {}", SDL_GetError()));
+  glContext = SDL_GL_CreateContext(window);
+  if (glContext == nullptr) throw std::runtime_error(fmt::format("Failed to create GL context: {}", SDL_GetError()));
+  SDL_GL_MakeCurrent(window, glContext);
 #ifdef _WIN32
-  hwnd = glfwGetWin32Window(window);
+  hwnd = (HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
   if (SUCCEEDED(OleInitialize(nullptr))) oleOk = true;
 #endif
 
+  wakeupEventType = SDL_RegisterEvents(1);
   initGui();
-  installCallbacks(window);
-  ImGui_ImplGlfw_InitForOpenGL(window, true);
+  ImGui_ImplSDL3_InitForOpenGL(window, glContext);
 }
 
 Window::~Window() {
-  ImGui_ImplGlfw_Shutdown();
+  ImGui_ImplSDL3_Shutdown();
   exitGui();
 #ifdef _WIN32
   if (taskbarList != nullptr) taskbarList->Release();
   if (oleOk) OleUninitialize();
 #endif
 
-  glfwDestroyWindow(window);
-  glfwTerminate();
+  SDL_GL_DestroyContext(glContext);
+  SDL_DestroyWindow(window);
+  SDL_Quit();
 }
 
-void Window::initGLFW() {
-  glfwSetErrorCallback(
-      [](int error, const char* desc) { fmt::print(fg(fmt::color::red), "GLFW [{}]: {}\n", error, desc); });
-#ifdef GLFW_PATCHED
-  glfwInitHint(GLFW_WIN32_MESSAGES_IN_FIBER, GLFW_TRUE);
-#endif
-  if (!glfwInit()) throw std::runtime_error("Failed to initialize GLFW!");
+void Window::initSDL() {
+  if (!SDL_Init(SDL_INIT_VIDEO)) throw std::runtime_error(fmt::format("Failed to initialize SDL: {}", SDL_GetError()));
 
 #if defined(IMGUI_IMPL_OPENGL_ES3)
-  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
-  glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_EGL_CONTEXT_API);
-  glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_ES_API);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
 #elif defined(__APPLE__)
-  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
-  glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-  glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
 #else
-  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
-  glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 #endif
-  glfwWindowHint(GLFW_AUTO_ICONIFY, GLFW_FALSE);
-  glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+  SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0");
 }
 
 bool Window::init(OptionParser& parser) {
@@ -79,14 +77,6 @@ bool Window::init(OptionParser& parser) {
     if (path == "-") mpv->property("input-terminal", "yes");
     mpv->commandv("loadfile", path.c_str(), "append-play", nullptr);
   }
-#if defined(__APPLE__) && defined(GLFW_PATCHED)
-  const char** openedFileNames = glfwGetOpenedFilenames();
-  if (openedFileNames != nullptr) {
-    int count = 0;
-    while (openedFileNames[count] != nullptr) count++;
-    onDropEvent(count, openedFileNames);
-  }
-#endif
 
 #ifdef _WIN32
   if (oleOk) setupWin32Taskbar();
@@ -121,26 +111,35 @@ void Window::run() {
   });
 
   restoreState();
-  glfwShowWindow(window);
+  SDL_ShowWindow(window);
 
-  double lastTime = glfwGetTime();
-  while (!glfwWindowShouldClose(window)) {
-    if (!glfwGetWindowAttrib(window, GLFW_VISIBLE) || glfwGetWindowAttrib(window, GLFW_ICONIFIED))
-      glfwWaitEvents();
-    else
-      glfwPollEvents();
+  double lastTime = SDL_GetTicks() / 1000.0;
+  while (!shouldClose) {
+    SDL_Event event;
+    if (minimized) {
+      SDL_WaitEvent(nullptr);
+      while (SDL_PollEvent(&event)) {
+        ImGui_ImplSDL3_ProcessEvent(&event);
+        processEvent(event);
+      }
+    } else {
+      while (SDL_PollEvent(&event)) {
+        ImGui_ImplSDL3_ProcessEvent(&event);
+        processEvent(event);
+      }
+    }
 
     mpv->waitEvent();
 
     render();
     updateCursor();
 
-    double targetDelta = 1.0f / config->Data.Interface.Fps;
-    double delta = lastTime - glfwGetTime();
+    double targetDelta = 1.0 / config->Data.Interface.Fps;
+    double delta = lastTime - SDL_GetTicks() / 1000.0;
     if (delta > 0 && delta < targetDelta)
-      glfwWaitEventsTimeout(delta);
+      SDL_WaitEventTimeout(nullptr, (Sint32)(delta * 1000));
     else
-      lastTime = glfwGetTime();
+      lastTime = SDL_GetTicks() / 1000.0;
     lastTime += targetDelta;
   }
 
@@ -151,7 +150,11 @@ void Window::run() {
   saveState();
 }
 
-void Window::wakeup() { glfwPostEmptyEvent(); }
+void Window::wakeup() {
+  SDL_Event ev{};
+  ev.type = wakeupEventType;
+  SDL_PushEvent(&ev);
+}
 
 void Window::updateCursor() {
   if (!ownCursor || mpv->cursorAutohide == "" || ImGui::GetIO().WantCaptureMouse || ImGui::IsMouseDragging(0)) return;
@@ -162,83 +165,85 @@ void Window::updateCursor() {
   else if (mpv->cursorAutohide == "always")
     cursor = false;
   else
-    cursor = (glfwGetTime() - lastInputAt) * 1000 < std::stoi(mpv->cursorAutohide);
-  glfwSetInputMode(window, GLFW_CURSOR, cursor ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_HIDDEN);
+    cursor = (SDL_GetTicks() - lastInputAt) < (Uint64)std::stoi(mpv->cursorAutohide);
+  if (cursor)
+    SDL_ShowCursor();
+  else
+    SDL_HideCursor();
   ImGui::SetMouseCursor(cursor ? ImGuiMouseCursor_Arrow : ImGuiMouseCursor_None);
 }
 
-void Window::installCallbacks(GLFWwindow* target) {
-  glfwSetWindowUserPointer(target, this);
-
-  glfwSetWindowContentScaleCallback(target, [](GLFWwindow* window, float x, float y) {
-    auto win = static_cast<Window*>(glfwGetWindowUserPointer(window));
-    win->config->Data.Interface.Scale = std::max(x, y);
-    win->config->FontReload = true;
-  });
-  glfwSetWindowCloseCallback(target, [](GLFWwindow* window) {
-    auto win = static_cast<Window*>(glfwGetWindowUserPointer(window));
-    win->shutdown();
-  });
-  glfwSetWindowSizeCallback(target, [](GLFWwindow* window, int w, int h) {
-    auto win = static_cast<Window*>(glfwGetWindowUserPointer(window));
-    win->render();
-  });
-  glfwSetWindowPosCallback(target, [](GLFWwindow* window, int x, int y) {
-    auto win = static_cast<Window*>(glfwGetWindowUserPointer(window));
-    win->render();
-  });
-  glfwSetCursorEnterCallback(target, [](GLFWwindow* window, int entered) {
-    auto win = static_cast<Window*>(glfwGetWindowUserPointer(window));
-    win->ownCursor = entered;
-  });
-  glfwSetCursorPosCallback(target, [](GLFWwindow* window, double x, double y) {
-    auto win = static_cast<Window*>(glfwGetWindowUserPointer(window));
-    win->lastInputAt = glfwGetTime();
-    if (ImGui::GetIO().WantCaptureMouse) return;
-#ifdef __APPLE__
-    float xscale, yscale;
-    glfwGetWindowContentScale(window, &xscale, &yscale);
-    x *= xscale;
-    y *= yscale;
-#endif
-    win->onCursorEvent(x, y);
-#ifdef GLFW_PATCHED
-    if (win->mpv->allowDrag() && win->height - y > 280) {  // 280: height of the OSC bar
-      if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) glfwDragWindow(window);
-    }
-#endif
-  });
-  glfwSetMouseButtonCallback(target, [](GLFWwindow* window, int button, int action, int mods) {
-    auto win = static_cast<Window*>(glfwGetWindowUserPointer(window));
-    win->lastInputAt = glfwGetTime();
-    if (!ImGui::GetIO().WantCaptureMouse) win->handleMouse(button, action, mods);
-  });
-  glfwSetScrollCallback(target, [](GLFWwindow* window, double x, double y) {
-    auto win = static_cast<Window*>(glfwGetWindowUserPointer(window));
-    win->lastInputAt = glfwGetTime();
-    if (!ImGui::GetIO().WantCaptureMouse) win->onScrollEvent(x, y);
-  });
-  glfwSetKeyCallback(target, [](GLFWwindow* window, int key, int scancode, int action, int mods) {
-    auto win = static_cast<Window*>(glfwGetWindowUserPointer(window));
-    win->lastInputAt = glfwGetTime();
-    if (!ImGui::GetIO().WantCaptureKeyboard) win->handleKey(key, action, mods);
-  });
-  glfwSetDropCallback(target, [](GLFWwindow* window, int count, const char** paths) {
-    auto win = static_cast<Window*>(glfwGetWindowUserPointer(window));
-    if (!ImGui::GetIO().WantCaptureMouse) win->onDropEvent(count, paths);
-  });
+void Window::processEvent(const SDL_Event& event) {
+  switch (event.type) {
+    case SDL_EVENT_QUIT:
+    case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+      shutdown();
+      shouldClose = true;
+      break;
+    case SDL_EVENT_WINDOW_RESIZED:
+    case SDL_EVENT_WINDOW_MOVED:
+      render();
+      break;
+    case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+      config->Data.Interface.Scale = SDL_GetWindowDisplayScale(window);
+      config->FontReload = true;
+      break;
+    case SDL_EVENT_WINDOW_MINIMIZED:
+      minimized = true;
+      break;
+    case SDL_EVENT_WINDOW_RESTORED:
+    case SDL_EVENT_WINDOW_SHOWN:
+      minimized = false;
+      break;
+    case SDL_EVENT_WINDOW_MOUSE_ENTER:
+      ownCursor = true;
+      break;
+    case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+      ownCursor = false;
+      break;
+    case SDL_EVENT_MOUSE_MOTION:
+      lastInputAt = SDL_GetTicks();
+      if (!ImGui::GetIO().WantCaptureMouse) onCursorEvent(event.motion.x, event.motion.y);
+      break;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+      lastInputAt = SDL_GetTicks();
+      if (!ImGui::GetIO().WantCaptureMouse)
+        handleMouse(event.button.button, event.type == SDL_EVENT_MOUSE_BUTTON_DOWN,
+                    (SDL_Keymod)SDL_GetModState());
+      break;
+    case SDL_EVENT_MOUSE_WHEEL:
+      lastInputAt = SDL_GetTicks();
+      if (!ImGui::GetIO().WantCaptureMouse) onScrollEvent(-event.wheel.x, event.wheel.y);
+      break;
+    case SDL_EVENT_KEY_DOWN:
+    case SDL_EVENT_KEY_UP:
+      lastInputAt = SDL_GetTicks();
+      if (!ImGui::GetIO().WantCaptureKeyboard)
+        handleKey(event.key.scancode, event.type == SDL_EVENT_KEY_DOWN, (SDL_Keymod)event.key.mod);
+      break;
+    case SDL_EVENT_DROP_FILE:
+      if (!ImGui::GetIO().WantCaptureMouse) {
+        const char* paths[] = {event.drop.data};
+        onDropEvent(1, paths);
+      }
+      SDL_free((void*)event.drop.data);
+      break;
+    default:
+      break;
+  }
 }
 
-void Window::handleKey(int key, int action, int mods) {
+void Window::handleKey(SDL_Scancode scancode, bool down, SDL_Keymod mods) {
   std::string name;
-  if (mods & GLFW_MOD_SHIFT) {
-    if (auto s = shiftMappings.find(key); s != shiftMappings.end()) {
+  if (mods & SDL_KMOD_SHIFT) {
+    if (auto s = shiftMappings.find(scancode); s != shiftMappings.end()) {
       name = s->second;
-      mods &= ~GLFW_MOD_SHIFT;
+      mods = (SDL_Keymod)(mods & ~SDL_KMOD_SHIFT);
     }
   }
   if (name.empty()) {
-    auto s = keyMappings.find(key);
+    auto s = keyMappings.find(scancode);
     if (s == keyMappings.end()) return;
     name = s->second;
   }
@@ -246,137 +251,111 @@ void Window::handleKey(int key, int action, int mods) {
   std::vector<std::string> keys;
   translateMod(keys, mods);
   keys.push_back(name);
-  sendKeyEvent(fmt::format("{}", join(keys, "+")), action);
+  sendKeyEvent(fmt::format("{}", join(keys, "+")), down);
 }
 
-void Window::handleMouse(int button, int action, int mods) {
+void Window::handleMouse(Uint8 button, bool down, SDL_Keymod mods) {
   std::vector<std::string> keys;
   translateMod(keys, mods);
   auto s = mbtnMappings.find(button);
   if (s == mbtnMappings.end()) return;
   keys.push_back(s->second);
-  sendKeyEvent(fmt::format("{}", join(keys, "+")), action);
+  sendKeyEvent(fmt::format("{}", join(keys, "+")), down);
 }
 
 void Window::sendKeyEvent(std::string key, bool action) {
-  if (action == GLFW_PRESS)
+  if (action)
     onKeyDownEvent(key);
-  else if (action == GLFW_RELEASE)
+  else
     onKeyUpEvent(key);
 }
 
-void Window::translateMod(std::vector<std::string>& keys, int mods) {
-  if (mods & GLFW_MOD_CONTROL) keys.emplace_back("Ctrl");
-  if (mods & GLFW_MOD_ALT) keys.emplace_back("Alt");
-  if (mods & GLFW_MOD_SHIFT) keys.emplace_back("Shift");
-  if (mods & GLFW_MOD_SUPER) keys.emplace_back("Meta");
+void Window::translateMod(std::vector<std::string>& keys, SDL_Keymod mods) {
+  if (mods & SDL_KMOD_CTRL) keys.emplace_back("Ctrl");
+  if (mods & SDL_KMOD_ALT) keys.emplace_back("Alt");
+  if (mods & SDL_KMOD_SHIFT) keys.emplace_back("Shift");
+  if (mods & SDL_KMOD_GUI) keys.emplace_back("Meta");
 }
 
 #ifdef _WIN32
-int64_t Window::GetWid() { return config->Data.Mpv.UseWid ? static_cast<uint32_t>((intptr_t)hwnd) : 0; }
+int64_t Window::GetWid() { return config->Data.Mpv.UseWid ? (int64_t)(intptr_t)hwnd : 0; }
 #endif
 
-GLAddrLoadFunc Window::GetGLAddrFunc() { return (GLAddrLoadFunc)glfwGetProcAddress; }
+GLAddrLoadFunc Window::GetGLAddrFunc() { return (GLAddrLoadFunc)SDL_GL_GetProcAddress; }
 
 std::string Window::GetClipboardString() {
-  const char* s = glfwGetClipboardString(window);
-  return s != nullptr ? s : "";
+  auto* s = SDL_GetClipboardText();
+  std::string r = s ? s : "";
+  SDL_free(s);
+  return r;
 }
 
 void Window::GetMonitorSize(int* w, int* h) {
-  const GLFWvidmode* mode = glfwGetVideoMode(getMonitor(window));
-  *w = mode->width;
-  *h = mode->height;
+  const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(getDisplay());
+  *w = mode->w;
+  *h = mode->h;
 }
 
 int Window::GetMonitorRefreshRate() {
-  const GLFWvidmode* mode = glfwGetVideoMode(getMonitor(window));
-  return mode->refreshRate;
+  const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(getDisplay());
+  return (int)mode->refresh_rate;
 }
 
-void Window::GetFramebufferSize(int* w, int* h) { glfwGetFramebufferSize(window, w, h); }
+void Window::GetFramebufferSize(int* w, int* h) { SDL_GetWindowSizeInPixels(window, w, h); }
 
-void Window::MakeContextCurrent() { glfwMakeContextCurrent(window); }
+void Window::MakeContextCurrent() { SDL_GL_MakeCurrent(window, glContext); }
 
-void Window::DeleteContext() { glfwMakeContextCurrent(nullptr); }
+void Window::DeleteContext() { SDL_GL_MakeCurrent(window, nullptr); }
 
-void Window::SwapBuffers() { glfwSwapBuffers(window); }
+void Window::SwapBuffers() { SDL_GL_SwapWindow(window); }
 
-void Window::SetSwapInterval(int interval) { glfwSwapInterval(interval); }
+void Window::SetSwapInterval(int interval) { SDL_GL_SetSwapInterval(interval); }
 
-void Window::BackendNewFrame() { ImGui_ImplGlfw_NewFrame(); };
+void Window::BackendNewFrame() { ImGui_ImplSDL3_NewFrame(); }
 
-void Window::GetWindowScale(float* x, float* y) { glfwGetWindowContentScale(window, x, y); }
+void Window::GetWindowScale(float* x, float* y) {
+  float s = SDL_GetWindowDisplayScale(window);
+  *x = s;
+  *y = s;
+}
 
-void Window::GetWindowPos(int* x, int* y) { glfwGetWindowPos(window, x, y); }
+void Window::GetWindowPos(int* x, int* y) { SDL_GetWindowPosition(window, x, y); }
 
-void Window::SetWindowPos(int x, int y) { glfwSetWindowPos(window, x, y); }
+void Window::SetWindowPos(int x, int y) { SDL_SetWindowPosition(window, x, y); }
 
-void Window::GetWindowSize(int* w, int* h) { glfwGetWindowSize(window, w, h); }
+void Window::GetWindowSize(int* w, int* h) { SDL_GetWindowSize(window, w, h); }
 
-void Window::SetWindowSize(int w, int h) { glfwSetWindowSize(window, w, h); }
+void Window::SetWindowSize(int w, int h) { SDL_SetWindowSize(window, w, h); }
 
-void Window::SetWindowTitle(std::string title) { glfwSetWindowTitle(window, title.c_str()); }
+void Window::SetWindowTitle(std::string title) { SDL_SetWindowTitle(window, title.c_str()); }
 
-void Window::SetWindowAspectRatio(int num, int den) { glfwSetWindowAspectRatio(window, num, den); }
+void Window::SetWindowAspectRatio(int num, int den) {
+  SDL_SetWindowAspectRatio(window, (float)num / den, (float)num / den);
+}
 
 void Window::SetWindowMaximized(bool m) {
   if (m)
-    glfwMaximizeWindow(window);
+    SDL_MaximizeWindow(window);
   else
-    glfwRestoreWindow(window);
+    SDL_RestoreWindow(window);
 }
 
 void Window::SetWindowMinimized(bool m) {
   if (m)
-    glfwIconifyWindow(window);
+    SDL_MinimizeWindow(window);
   else
-    glfwRestoreWindow(window);
+    SDL_RestoreWindow(window);
 }
 
-void Window::SetWindowDecorated(bool d) { glfwSetWindowAttrib(window, GLFW_DECORATED, d); }
+void Window::SetWindowDecorated(bool d) { SDL_SetWindowBordered(window, d); }
 
-void Window::SetWindowFloating(bool f) { glfwSetWindowAttrib(window, GLFW_FLOATING, f); }
+void Window::SetWindowFloating(bool f) { SDL_SetWindowAlwaysOnTop(window, f); }
 
-void Window::SetWindowFullscreen(bool fs) {
-  bool isFullscreen = glfwGetWindowMonitor(window) != nullptr;
-  if (isFullscreen == fs) return;
+void Window::SetWindowFullscreen(bool fs) { SDL_SetWindowFullscreen(window, fs); }
 
-  static int x, y, w, h;
-  if (fs) {
-    glfwGetWindowPos(window, &x, &y);
-    glfwGetWindowSize(window, &w, &h);
-    GLFWmonitor* monitor = getMonitor(window);
-    const GLFWvidmode* mode = glfwGetVideoMode(monitor);
-    glfwSetWindowMonitor(window, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
-  } else
-    glfwSetWindowMonitor(window, nullptr, x, y, w, h, 0);
-}
+void Window::SetWindowShouldClose(bool c) { if (c) shouldClose = true; }
 
-void Window::SetWindowShouldClose(bool c) { glfwSetWindowShouldClose(window, c); }
-
-GLFWmonitor* Window::getMonitor(GLFWwindow* target) {
-  int n, wx, wy, ww, wh, mx, my;
-  int bestoverlap = 0;
-
-  glfwGetWindowPos(target, &wx, &wy);
-  glfwGetWindowSize(target, &ww, &wh);
-  GLFWmonitor* bestmonitor = nullptr;
-  auto monitors = glfwGetMonitors(&n);
-
-  for (int i = 0; i < n; i++) {
-    const GLFWvidmode* mode = glfwGetVideoMode(monitors[i]);
-    glfwGetMonitorPos(monitors[i], &mx, &my);
-    int overlap = std::max(0, std::min(wx + ww, mx + mode->width) - std::max(wx, mx)) *
-                  std::max(0, std::min(wy + wh, my + mode->height) - std::max(wy, my));
-    if (bestoverlap < overlap) {
-      bestoverlap = overlap;
-      bestmonitor = monitors[i];
-    }
-  }
-
-  return bestmonitor != nullptr ? bestmonitor : glfwGetPrimaryMonitor();
-}
+SDL_DisplayID Window::getDisplay() { return SDL_GetDisplayForWindow(window); }
 
 #ifdef _WIN32
 void Window::setupWin32Taskbar() {

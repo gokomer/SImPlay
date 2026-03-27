@@ -9,7 +9,7 @@ on:
 
 jobs:
   linux:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     name: Ubuntu
     steps:
       - uses: actions/checkout@v4
@@ -20,7 +20,25 @@ jobs:
           sudo add-apt-repository universe
           sudo apt-get update
           sudo apt-get install -y build-essential cmake ninja-build git pkg-config \
-          libfuse2 libgtk-3-dev libglfw3-dev libfreetype6-dev libmpv-dev
+          libfuse2 libgtk-3-dev libglfw3-dev libfreetype6-dev libmpv-dev libasound2-dev libpulse-dev \
+          build-essential git cmake ninja-build gnome-desktop-testing  \
+          libaudio-dev libfribidi-dev libjack-dev libsndio-dev libx11-dev libxext-dev \
+          libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev \
+          libxkbcommon-dev libdrm-dev libgbm-dev libgl1-mesa-dev libgles2-mesa-dev \
+          libegl1-mesa-dev libdbus-1-dev libibus-1.0-dev libudev-dev libthai-dev \
+          libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev
+
+
+      - name: Compile and install latest SDL3
+        run: |
+          git clone --depth 1 --branch release-3.4.2 https://github.com/libsdl-org/SDL.git
+          cd SDL
+          cmake -S . -B build
+          cmake --build build
+          sudo cmake --install build --prefix /usr/local
+
+
+
       - name: Build ImPlay
         env:
           DEPLOY_GTK_VERSION: 3
@@ -52,7 +70,7 @@ jobs:
           HOMEBREW_NO_AUTO_UPDATE: 1
           HOMEBREW_NO_INSTALL_CLEANUP: 1
         run: |
-          brew install cmake ninja git mpv freetype2 pkg-config
+          brew install cmake ninja git mpv freetype2 pkg-config sdl3
       - name: Build ImPlay
         env:
           PKG_CONFIG_PATH: /usr/local/opt/libarchive/lib/pkgconfig
@@ -86,6 +104,7 @@ jobs:
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-freetype
+            mingw-w64-x86_64-sdl3
           update: true
       - name: Build ImPlay
         shell: msys2 {0}
