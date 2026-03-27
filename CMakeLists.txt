@@ -12,7 +12,6 @@ set(CMAKE_CXX_STANDARD 20)
 include(CMakeDependentOption)
 
 option(USE_OPENGL_ES3 "Compile with OpenGL ES 3.0 loader" OFF)
-option(USE_PATCHED_GLFW "Use patched GLFW to support additional features" OFF)
 option(CREATE_PACKAGE "Create binary packages with CPack" OFF)
 cmake_dependent_option(USE_MPV_WIN_BUILD "Use Prebuilt static mpv dll on Windows" ON "WIN32" OFF)
 cmake_dependent_option(USE_XDG_PORTAL "Use xdg-desktop-portal for file dialogs on Linux" OFF "UNIX;NOT APPLE" OFF)
@@ -26,15 +25,12 @@ if(USE_MPV_WIN_BUILD)
 else()
   pkg_search_module(MPV REQUIRED mpv>=0.33.0)
 endif()
-if(USE_PATCHED_GLFW)
-  add_subdirectory(third_party/glfw)
-  set(GLFW_LIBRARIES glfw)
-else()
-  pkg_search_module(GLFW REQUIRED glfw3>=3.1)
-endif()
 if(USE_XDG_PORTAL)
   set(NFD_PORTAL ON CACHE BOOL "Use xdg-desktop-portal for file dialogs on Linux" FORCE)
 endif()
+
+pkg_search_module(SDL3 REQUIRED sdl3>=3.0.0 IMPORTED_TARGET)
+add_library(SDL3::SDL3 ALIAS PkgConfig::SDL3)
 
 set(LIBROMFS_PROJECT_NAME ${PROJECT_NAME})
 set(LIBROMFS_RESOURCE_LOCATION "${CMAKE_SOURCE_DIR}/resources/romfs")
@@ -68,8 +64,8 @@ set(SOURCE_FILES
   source/window.cpp
   source/main.cpp
 )
-set(INCLUDE_DIRS include ${MPV_INCLUDE_DIRS} ${GLFW_INCLUDE_DIRS} ${OPENGL_INCLUDE_DIR})
-set(LINK_LIBS glad fmt natsort json inipp nfd imgui ${CMAKE_THREAD_LIBS_INIT} ${MPV_LIBRARIES} ${GLFW_LIBRARIES} ${LIBROMFS_LIBRARY})
+set(INCLUDE_DIRS include ${MPV_INCLUDE_DIRS} ${OPENGL_INCLUDE_DIR})
+set(LINK_LIBS glad fmt natsort json inipp nfd imgui ${CMAKE_THREAD_LIBS_INIT} ${MPV_LIBRARIES} SDL3::SDL3 ${LIBROMFS_LIBRARY})
 
 if(WIN32)
   configure_file(${PROJECT_SOURCE_DIR}/resources/win32/app.rc.in ${PROJECT_BINARY_DIR}/app.rc @ONLY)
@@ -83,7 +79,6 @@ target_link_libraries(${PROJECT_NAME} PRIVATE ${LINK_LIBS})
 target_compile_definitions(${PROJECT_NAME} PRIVATE
   APP_VERSION="${GIT_VERSION}"
   $<$<BOOL:${USE_OPENGL_ES3}>:IMGUI_IMPL_OPENGL_ES3>
-  $<$<BOOL:${USE_PATCHED_GLFW}>:GLFW_PATCHED>
 )
 if(USE_MPV_WIN_BUILD)
   add_dependencies(${PROJECT_NAME} mpv_dev)
