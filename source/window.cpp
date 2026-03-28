@@ -223,11 +223,10 @@ void Window::processEvent(const SDL_Event& event) {
         handleKey(event.key.scancode, event.type == SDL_EVENT_KEY_DOWN, (SDL_Keymod)event.key.mod);
       break;
     case SDL_EVENT_DROP_FILE:
-      if (!ImGui::GetIO().WantCaptureMouse) {
+      if (!ImGui::GetIO().WantCaptureMouse && event.drop.data != nullptr && event.drop.data[0] != '\0') {
         const char* paths[] = {event.drop.data};
         onDropEvent(1, paths);
       }
-      SDL_free((void*)event.drop.data);
       break;
     default:
       break;
